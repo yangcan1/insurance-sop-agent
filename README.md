@@ -138,7 +138,7 @@ caller message
 
 ```bash
 pip install pytest
-pytest                              # 32 deterministic tests, fake LLM, no API key needed
+pytest                              # 45 deterministic tests incl. a 4,000-turn fuzz, fake LLM, no API key
 python -m tests.live_scenarios      # 10 end-to-end conversations against the real model (a few cents each)
 ```
 
@@ -146,7 +146,8 @@ The deterministic tests check the harness itself: the demo case, memory across t
 **that no claim data reaches the model before verification**, 2-of-5 not enough, contradicting details, aliases and
 formats, declined fields, ambiguity, case switching, email only on explicit choice, off-topic strikes, human
 handoff, frustration without bypass, representative consent (approve / timeout / unknown rep), the output guard,
-document-name mapping, and deadline math, plus 12 regression tests for the red-team findings.
+document-name mapping, and deadline math, plus regression tests for every red-team and review finding and a
+randomized test (400 conversations x 10 turns) asserting termination and no claim data before verification.
 
 The live scenarios: `demo`, `hint_first`, `frustrated`, `off_topic`, `rep`, `wrong_then_right`, `injection`,
 `asr_alias`, `other_insurer`, `refusal`.

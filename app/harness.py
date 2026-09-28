@@ -100,7 +100,7 @@ def turn(s, text, llm):
 def remember(s, x, events):
     fields = {"name": x.full_name, "dob": x.dob, "phone": x.phone, "email": x.email,
               "id_last4": x.id_last4, "policy_number": x.policy_number}
-    if fields["name"] and s.claimed.get("name") and data.is_partial_name(fields["name"], s.claimed["name"]):
+    if fields["name"] and s.claimed.get("name") and data.is_echo(fields["name"], s.claimed["name"]):
         fields["name"] = None  # an echoed first name ("Thanks, Margaret") never replaces the full name
     new = {k: v for k, v in fields.items() if v}
     for f in set(x.declined_fields) - set(new):  # refused or withdrawn ("forget the email"): stop checking it
@@ -109,7 +109,10 @@ def remember(s, x, events):
     s.declined = sorted((set(s.declined) | set(x.declined_fields)) - set(s.claimed))
     if x.caller_role != "unknown" and s.caller_role != "representative":  # once acting for someone else, stays so
         s.caller_role = x.caller_role
-    if x.representative_name and not (s.rep_name and data.is_partial_name(x.representative_name, s.rep_name)):
+    new_rel, old_rel = (x.relationship or "").lower(), (s.relationship or "").lower()
+    same_rep = s.rep_name and data.is_echo(x.representative_name or "", s.rep_name) and (
+        not new_rel or not old_rel or new_rel in old_rel or old_rel in new_rel)  # "Chen, her husband" is not David
+    if x.representative_name and not same_rep:
         if s.rep_name and data.norm_name(x.representative_name) != data.norm_name(s.rep_name):
             s.consent = None  # consent belongs to the person it was granted for, not to the session
         s.rep_name = x.representative_name
@@ -312,7 +315,8 @@ def process_step(s, x, text, llm, notes, events):
         matches = data.match_claims(data.claims_for(s.party_id), hints)
         if len(matches) == 1:
             return select_case(s, matches[0], x.intent, notes, events)
-        s.case_hints, s.phase, s.intent = hints, "RESOLVE_INTENT", x.intent
+        # the caller left this claim: drop it, otherwise post_step would bounce back to it forever
+        s.case_hints, s.phase, s.intent, s.case_id = hints, "RESOLVE_INTENT", x.intent, None
         return resolve_step(s, x, text, llm, notes, events)
     if x.intent:
         s.intent = x.intent
@@ -327,13 +331,17 @@ def post_step(s, x, text, llm, notes, events):
     """Wrap-up. The email needs an explicit send/skip; open questions are answered before the call ends."""
     email = data.mask_email(data.policyholder(s.party_id)["email"])
     s.phase = "POST_PROCESS"
-    if x.email_choice != "none":
+    if x.email_choice != "none" and s.email_offered:  # only an answer to an offer we made counts as consent
         s.email_choice = x.email_choice  # kept even if they also ask something
     hints = turn_hints(x)
     if hints and s.case_id and not data.match_claims([c for c in data.CLAIMS if c["case_id"] == s.case_id], hints):
         s.phase = "PROCESS_CASE"  # a different claim: back to case work (the email choice is remembered)
         return process_step(s, x, text, llm, notes, events)
+    picked = data.match_claims(data.claims_for(s.party_id), hints) if hints and not s.case_id else []
+    if len(picked) == 1:  # no claim selected yet and the caller names one (select directly: resolve_step would loop)
+        return select_case(s, picked[0], x.intent, notes, events)
     if x.question:
+        s.email_offered = s.email_offered or not s.email_choice  # the note below asks about the email
         notes.append(
             "Answer their question using only the data section (if it's about the summary email: it covers what was "
             f"discussed, claim status and next steps, and goes only to the email on file, {email}). "

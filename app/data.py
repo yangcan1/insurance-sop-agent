@@ -6,6 +6,7 @@ is deterministic and unit-testable.
 import json
 import os
 import re
+import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
@@ -42,8 +43,19 @@ def today():
 
 # ---------- identity ----------
 
+NO_SPACE_SCRIPTS = re.compile(r"[\u1100-\u11ff\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]")  # CJK, kana, Hangul
+
+
 def name_tokens(s):
-    return re.sub(r"[^a-z ]", " ", s.lower()).split()
+    s = unicodedata.normalize("NFKD", s).casefold()
+    # fold Latin accents only (José -> jose); other scripts keep their marks, so सीता != सुता and ヨシダ != ヨシタ
+    s = unicodedata.normalize("NFC", "".join(ch for ch in s if not "\u0300" <= ch <= "\u036f"))
+    return "".join(ch if ch.isalpha() or unicodedata.category(ch)[0] == "M" else " " for ch in s).split()
+
+
+def is_full_name(s):
+    t = name_tokens(s)  # CJK names are written without spaces, so one multi-character token is a full name
+    return len(t) > 1 or (len(t) == 1 and len(t[0]) > 1 and bool(NO_SPACE_SCRIPTS.search(t[0])))
 
 
 def norm_name(s):
@@ -55,8 +67,10 @@ def name_keys(n):
     return {"".join(t), "".join(t[-1:] + t[:-1])}  # given-name-first or family-name-first
 
 
-def is_partial_name(new, old):
-    return set(name_tokens(new)) < set(name_tokens(old))
+def is_echo(new, old):
+    """A fragment of a stored name ("Margaret" or 美玲) never replaces it; a different full name does."""
+    t = name_tokens(new)
+    return not is_full_name(new) or (len(t) == 1 and norm_name(new) in norm_name(old))
 
 
 def norm_dob(s):
@@ -102,7 +116,7 @@ def _record_values(rec, field):
 
 def provided_fields(claimed):
     """ID fields that count toward verification. A first name alone neither verifies nor contradicts."""
-    return [f for f in ID_FIELDS if claimed.get(f) and (f != "name" or len(name_tokens(claimed[f])) > 1)]
+    return [f for f in ID_FIELDS if claimed.get(f) and (f != "name" or is_full_name(claimed[f]))]
 
 
 def verify_identity(claimed):

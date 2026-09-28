@@ -223,10 +223,29 @@ AGENT : I've sent that summary to m•••••••@email.com — please re
         note by March 18, 2026 to keep your appeal on track. ...          [ENDED]
 ```
 
+## Follow-up review (after the red team)
+
+Two more offline passes (fake model, no API calls) found issues the live run hadn't reached. The first was a
+fact-check of every design claim against the code. The second was three adversarial reviewers attacking the fixes
+from that pass. All are fixed and each has a regression test (45 tests total):
+
+| ID | Sev | Finding | Fix |
+|---|---|---|---|
+| RT-23 | critical | Consent was tied to the session, not the person: after David Chen was approved, "this is Bob, her neighbour" kept access | A different representative name resets consent, so the existing re-gate applies |
+| RT-24 | critical | Same class: consent also carried over to "Chen, her husband", whose name is part of David's | A name fragment only counts as an echo if the stated relationship doesn't conflict |
+| RT-25 | major | Leaving a claim for an ambiguous one while saying "that's all" bounced between two steps until `RecursionError` (HTTP 500) | Clear the selected claim when returning to RESOLVE_INTENT; randomized termination test added |
+| RT-26 | major | One extracted "send" could send the email before it was ever offered | A send/skip only counts as an answer to an offer the agent actually made |
+| RT-27 | major | Only model-API errors rolled the session back; any other exception left a half-applied turn | Roll back on any exception; 500 with a clear message, logged |
+| RT-28 | major | Accented and non-Latin names could never match. The first fix then over-folded: Devanagari vowel signs were dropped, so "सुता शर्मी" matched "सीता शर्मा" (a false accept) | Fold Latin accents only, keep other scripts' marks, recompose with NFC; CJK full names without spaces count |
+| RT-29 | major | A correction that drops a middle name ("Margaret Chen" after "Margaret Anne Chen") was discarded as an echo, so a genuine caller got locked out | Only a non-full name, or a single-token fragment, counts as an echo |
+| RT-30 | major | In wrap-up with no claim selected, naming a claim was ignored | Select it directly and go back to PROCESS_CASE |
+| RT-31 | minor | Broken profile credentials returned a retryable 500 | Map `CredentialsError` to 401 without leaking file paths |
+| RT-32 | minor | A refused or truncated structured output raised inside the SDK (500, and PII in the traceback) | Catch `ValidationError` and fail closed with an empty extraction |
+
 ## How to reproduce
 
 ```bash
-pytest                                              # 32 deterministic tests incl. 12 red-team regressions
+pytest                                              # 45 deterministic tests (red-team + follow-up regressions, fuzz)
 python -m tests.live_scenarios                      # 10 live scenarios (needs an API key)
 python -m tests.live_scenarios rep other_insurer    # a subset
 ```

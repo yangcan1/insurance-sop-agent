@@ -1,4 +1,5 @@
 import copy
+import logging
 import os
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from pydantic import BaseModel  # noqa: E402
 from . import data, harness, llm  # noqa: E402
 
 app = FastAPI(title="Insurance Claims SOP Agent")
+log = logging.getLogger("sop-agent")
 SESSIONS = {}  # ponytail: in-memory, single process; swap for Redis if this ever runs multi-worker
 
 
@@ -58,15 +60,14 @@ def chat(body: ChatIn, x_api_key: str | None = Header(None)):
     snapshot = copy.deepcopy(s)
     try:
         reply = harness.turn(s, message, llm.LLM(api_key=x_api_key or None))
-    except (anthropic.AuthenticationError, anthropic.PermissionDeniedError):
-        SESSIONS[s.id] = snapshot
-        raise HTTPException(401, "The model API rejected the credentials. Enter a valid API key.")
-    except TypeError as e:  # SDK raises this when no credentials can be resolved at all
-        if "authentication" not in str(e):
-            raise
-        SESSIONS[s.id] = snapshot
-        raise HTTPException(401, "No API credentials configured. Enter an API key or set ANTHROPIC_API_KEY.")
-    except anthropic.APIError as e:
-        SESSIONS[s.id] = snapshot
-        raise HTTPException(502, f"Model API error: {getattr(e, 'message', e)}")
+    except Exception as e:
+        SESSIONS[s.id] = snapshot  # a failed turn leaves nothing behind: no half-applied memory, attempts or history
+        if isinstance(e, (anthropic.AuthenticationError, anthropic.PermissionDeniedError)):
+            raise HTTPException(401, "The model API rejected the credentials. Enter a valid API key.")
+        if isinstance(e, anthropic.CredentialsError) or (isinstance(e, TypeError) and "authentication" in str(e)):
+            raise HTTPException(401, "No API credentials configured. Enter an API key or set ANTHROPIC_API_KEY.")
+        if isinstance(e, anthropic.APIError):
+            raise HTTPException(502, f"Model API error: {getattr(e, 'message', e)}")
+        log.exception("turn failed for session %s", s.id)
+        raise HTTPException(500, "Something went wrong on our side; your last message was not applied. Please try again.")
     return {"reply": reply, "state": harness.public_state(s)}

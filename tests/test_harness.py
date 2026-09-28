@@ -261,3 +261,144 @@ def test_consent_does_not_transfer_to_a_different_speaker():
     llm = FakeLLM(rep, X(), X(representative_name="Bob Stranger", relationship="neighbour"))
     s = run(llm, "rep", "she approved", "actually this is Bob, her neighbour")
     assert s.party_id is None and s.phase == "VERIFY_ID" and "CL-" not in llm.prompts[-1]
+
+
+# ---------- fixes from interview-prep fact-checking ----------
+
+def test_leaving_a_claim_while_finishing_does_not_loop():
+    s = run(FakeLLM(DEMO, X(case_status="closed", no_more_questions=True)), "demo", "that's all, the closed ones")
+    assert s.phase == "POST_PROCESS" and s.case_id is None and s.email_offered
+
+
+def test_email_needs_an_offer_before_a_send_counts():
+    llm = FakeLLM(DEMO, X(email_choice="send"), X(email_choice="send"))
+    s = run(llm, "demo", "email me the summary")
+    assert s.email is None and s.email_offered and s.phase == "POST_PROCESS"
+    harness.turn(s, "yes", llm)
+    assert s.phase == "ENDED" and s.email
+
+
+def test_failed_turn_rolls_back_the_session(monkeypatch):
+    from fastapi import HTTPException
+    from app import server
+
+    class Broken(FakeLLM):
+        def respond(self, harness_state, messages):
+            raise ValueError("boom")
+
+    monkeypatch.setattr(server.llm, "LLM", lambda api_key=None: Broken(X(**MARGARET)))
+    sid = server.new_session(server.NewSession())["session_id"]
+    try:
+        server.chat(server.ChatIn(session_id=sid, message="Margaret Chen ..."))
+        assert False, "expected a 500"
+    except HTTPException as e:
+        assert e.status_code == 500
+    s = server.SESSIONS[sid]
+    assert len(s.history) == 1 and s.claimed == {} and s.trace == []  # nothing half-applied
+
+
+def test_names_in_any_script(monkeypatch):
+    assert data.norm_name("José García") == data.norm_name("Jose Garcia")
+    assert data.norm_name("García José") in data.name_keys("José García")
+    assert data.provided_fields({"name": "陈美玲"}) == ["name"]  # CJK full name, no spaces
+    assert data.provided_fields({"name": "Margaret"}) == []      # a Latin first name alone still doesn't count
+    rec = {"party_id": "PX", "name": "陈美玲", "policy_number": "POL-1", "dob": "1990-01-01",
+           "id_type": "national_id_last4", "id_last4": "1234", "phone": "+15550001111", "email": "c@x.com"}
+    monkeypatch.setattr(data, "POLICYHOLDERS", data.POLICYHOLDERS + [rec])
+    assert data.verify_identity({"name": "陈美玲", "dob": "1990-01-01", "id_last4": "1234"})["party_id"] == "PX"
+    assert data.verify_identity({"name": "陈美玲", "dob": "1990-01-01", "id_last4": "1234"})["verified"]
+
+
+def test_random_conversations_terminate_and_never_leak_before_verification():
+    import random
+    rng = random.Random(7)
+    pool = [X(), DEMO, X(**MARGARET), X(full_name="Margaret Chen", dob="1985-03-16"), X(declined_fields=["dob"]),
+            X(case_status="closed", no_more_questions=True), X(case_type="auto"), X(case_type="dental", case_status="denied"),
+            X(no_more_questions=True), X(email_choice="send"), X(email_choice="skip"), X(question="how long?"),
+            X(off_topic=True), X(emotion="angry"), X(case_id="CL-3001"), X(case_month=1, question="which one?"),
+            X(caller_role="representative", representative_name="David Chen", relationship="son"),
+            X(representative_name="Bob Stranger"), X(wants_human=True), X(email_choice="send", question="and how long?")]
+    for _ in range(400):
+        llm = FakeLLM(*[rng.choice(pool) for _ in range(10)])
+        s = run(llm, *["msg"] * 10, consent_scenario=rng.choice(["default", "timeout"]))
+        assert s.phase in harness.PHASES + harness.TERMINAL
+        assert not s.email or s.email_offered
+        for p in llm.prompts:
+            if "Identity verified: NO" in p:
+                assert "DATA: none" in p and "pathology" not in p and "$" not in p
+
+
+# ---------- fixes from the adversarial review of the above ----------
+
+def _extra_record(monkeypatch, name):
+    rec = {"party_id": "PX", "name": name, "policy_number": "POL-1", "dob": "1990-01-01",
+           "id_type": "national_id_last4", "id_last4": "1234", "phone": "+15550001111", "email": "c@x.com"}
+    monkeypatch.setattr(data, "POLICYHOLDERS", data.POLICYHOLDERS + [rec])
+
+
+def test_other_scripts_keep_their_marks_so_different_names_stay_different(monkeypatch):
+    _extra_record(monkeypatch, "सीता शर्मा")  # Sita Sharma
+    ok = {"phone": "+15550001111", "id_last4": "1234"}
+    assert data.verify_identity({"name": "सीता शर्मा", **ok})["verified"]
+    assert not data.verify_identity({"name": "सुता शर्मी", **ok})["verified"]  # a different name must not collide
+    assert data.norm_name("ヨシダ") != data.norm_name("ヨシタ")
+    assert not data.is_full_name("김") and data.is_full_name("김민준") and not data.is_full_name("राम")
+    assert data.norm_name("Muñoz") == "munoz" and data.norm_name("Ｍａｒｇａｒｅｔ") == "margaret"
+
+
+def test_name_correction_that_drops_a_middle_name_is_accepted():
+    llm = FakeLLM(X(full_name="Margaret Anne Chen", dob="1985-03-15", id_last4="4472"), X(full_name="Margaret Chen"))
+    s = run(llm, "m", "sorry, just Margaret Chen")
+    assert s.party_id == "P9"
+
+
+def test_echoed_cjk_given_name_does_not_replace_full_name():
+    s = run(FakeLLM(X(full_name="陈美玲"), X(full_name="美玲")), "a", "b")
+    assert s.claimed["name"] == "陈美玲"
+
+
+def test_consent_does_not_carry_to_someone_sharing_the_reps_surname():
+    rep = X(full_name="Margaret Chen", dob="1985-03-15", phone="650-521-2836",
+            caller_role="representative", representative_name="David Chen", relationship="son")
+    llm = FakeLLM(rep, X(), X(representative_name="Chen", relationship="husband"))
+    s = run(llm, "rep", "approved", "this is Chen, her husband")
+    assert s.party_id is None and "CL-" not in llm.prompts[-1]
+    s = run(FakeLLM(rep, X(), X(representative_name="David", relationship="her son")), "rep", "approved", "David here")
+    assert s.party_id == "P9"  # the same rep echoing his first name keeps consent
+
+
+def test_naming_a_claim_during_wrap_up_with_none_selected_goes_back_to_it():
+    llm = FakeLLM(DEMO, X(case_status="closed", no_more_questions=True), X(case_type="dental"))
+    s = run(llm, "demo", "that's all, the closed ones", "the dental one")
+    assert s.phase == "PROCESS_CASE" and s.case_id == "CL-1899" and "CLAIM FACTS" in llm.prompts[-1]
+
+
+def test_invalid_structured_output_fails_closed():
+    from app import llm as llm_mod
+
+    class BadParse:
+        def parse(self, **kw):
+            llm_mod.Extraction.model_validate_json('{"full_name": "Marg')  # raises ValidationError
+
+    real = llm_mod.LLM.__new__(llm_mod.LLM)
+    real.client = type("C", (), {"messages": BadParse()})()
+    assert real.extract({}) == llm_mod.Extraction()
+    assert real.summarize([], []).discussed == []
+
+
+def test_bad_profile_credentials_are_a_401(monkeypatch):
+    import anthropic
+    from fastapi import HTTPException
+    from app import server
+
+    class NoCreds(FakeLLM):
+        def extract(self, ctx):
+            raise anthropic.CredentialsError("Config file not found at /secret/path")
+
+    monkeypatch.setattr(server.llm, "LLM", lambda api_key=None: NoCreds())
+    sid = server.new_session(server.NewSession())["session_id"]
+    try:
+        server.chat(server.ChatIn(session_id=sid, message="hi"))
+        assert False
+    except HTTPException as e:
+        assert e.status_code == 401 and "/secret/path" not in e.detail

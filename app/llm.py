@@ -6,7 +6,7 @@ from functools import lru_cache
 from typing import Literal, Optional
 
 import anthropic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 MODEL = os.getenv("MODEL", "claude-opus-5")
 EFFORT = os.getenv("EFFORT", "low")  # set EFFORT= (empty) for models without effort support, e.g. Haiku 4.5
@@ -106,11 +106,14 @@ class LLM:
         self.client = _client(api_key)
 
     def extract(self, ctx):
-        r = self.client.messages.parse(
-            model=MODEL, max_tokens=4000, system=EXTRACT_SYSTEM,
-            messages=[{"role": "user", "content": json.dumps(ctx, indent=1)}],
-            output_format=Extraction, **_effort(),
-        )
+        try:
+            r = self.client.messages.parse(
+                model=MODEL, max_tokens=4000, system=EXTRACT_SYSTEM,
+                messages=[{"role": "user", "content": json.dumps(ctx, indent=1)}],
+                output_format=Extraction, **_effort(),
+            )
+        except ValidationError:  # refusal or truncated JSON: treat as "nothing extracted" (fails closed)
+            return Extraction()
         if r.stop_reason == "refusal" or r.parsed_output is None:
             return Extraction()
         return r.parsed_output
@@ -130,6 +133,12 @@ class LLM:
         return text
 
     def summarize(self, facts, transcript):
+        try:
+            return self._summarize(facts, transcript)
+        except ValidationError:
+            return EmailSummary(discussed=[], next_steps=[])
+
+    def _summarize(self, facts, transcript):
         r = self.client.messages.parse(
             model=MODEL, max_tokens=4000,
             system="Summarize this insurance support conversation for a follow-up email to the customer. "
