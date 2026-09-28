@@ -253,3 +253,11 @@ def test_rt_intent_reset_when_switching_via_disambiguation():
     llm = FakeLLM(DEMO, X(case_status="closed"), X(case_type="dental"))
     s = run(llm, "demo", "what about my closed claim?", "the dental one")
     assert s.case_id == "CL-1899" and s.intent == "general_claim_question"
+
+
+def test_consent_does_not_transfer_to_a_different_speaker():
+    rep = X(full_name="Margaret Chen", dob="1985-03-15", phone="650-521-2836",
+            caller_role="representative", representative_name="David Chen")
+    llm = FakeLLM(rep, X(), X(representative_name="Bob Stranger", relationship="neighbour"))
+    s = run(llm, "rep", "she approved", "actually this is Bob, her neighbour")
+    assert s.party_id is None and s.phase == "VERIFY_ID" and "CL-" not in llm.prompts[-1]

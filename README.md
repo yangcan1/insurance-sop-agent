@@ -10,7 +10,8 @@ caller language, and phrasing grounded answers with empathy.
 VERIFY_ID  ->  RESOLVE_INTENT  ->  PROCESS_CASE  ->  POST_PROCESS
  (strict)       (flexible)          (flexible,        (strict consent
                                      grounded)          for email)
-        any phase ─> HUMAN_HANDOFF  (asked for a human / 3 failed verifications / consent timeout)
+        any phase ─> HUMAN_HANDOFF  (asked for a human / 3 failed verifications; after consent timeout or
+                                     repeated off-topic/frustration the agent offers a human)
 ```
 
 ## Quick start

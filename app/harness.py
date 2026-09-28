@@ -110,6 +110,8 @@ def remember(s, x, events):
     if x.caller_role != "unknown" and s.caller_role != "representative":  # once acting for someone else, stays so
         s.caller_role = x.caller_role
     if x.representative_name and not (s.rep_name and data.is_partial_name(x.representative_name, s.rep_name)):
+        if s.rep_name and data.norm_name(x.representative_name) != data.norm_name(s.rep_name):
+            s.consent = None  # consent belongs to the person it was granted for, not to the session
         s.rep_name = x.representative_name
     s.relationship = x.relationship or s.relationship
     hints = turn_hints(x)
