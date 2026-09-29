@@ -12,7 +12,7 @@ the conversations behind each finding.
 | Round 2 (offline) | 29 agents re-read every recorded conversation, then adversarially verified each finding by reading the code and replaying the exact extractions through the harness with a scripted fake model. **0 API calls** |
 | Confirmed findings | **5 critical, 18 major, 9 minor fixed** across two rounds (RT-01–22 red team, RT-23–32 follow-up review); 2 minor left as known limits |
 | Regression tests | 53 deterministic tests in total (fake model, no API key needed), including one per code fix and a randomized termination/no-leak fuzz |
-| Final live check | <!-- RUN1-REDTEAM --> |
+| Final live check | **12/12** end-to-end scenarios on `claude-sonnet-5` after all fixes, incl. the brief's exact frustrated line as a first and as a second message (transcripts: `docs/live_run_sonnet5.txt`) |
 
 The most important result is what did **not** break. In every recorded conversation, the model never saw or
 disclosed claim data before verification, and the output guard never had to fire. That is because the
@@ -146,8 +146,9 @@ Attacks that did not work, across the recorded conversations:
 
 ## After the fixes: live re-run
 
+First re-run after the fixes (7 scenarios, before the follow-up review and the v2 wording pass):
 `MODEL=claude-sonnet-5 python -m tests.live_scenarios demo hint_first frustrated injection off_topic rep other_insurer`
-→ **7/7 PASS**. Selected transcripts:
+→ **7/7 PASS**. The final 12/12 run after every change is in `docs/live_run_sonnet5.txt`. Selected transcripts from this earlier run:
 
 **Representative (RT-17 fixed: no "details check out / you're on file")**
 ```

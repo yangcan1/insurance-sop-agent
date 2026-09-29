@@ -194,7 +194,9 @@ randomized test (400 conversations x 10 turns) asserting termination and no clai
 
 The live scenarios: `demo`, `hint_first`, `frustrated`, `chip_frustrated` and `frustrated_handoff` (the exact
 line from the brief), `off_topic`, `rep`, `wrong_then_right`, `injection`, `asr_alias`, `other_insurer`, `refusal`.
-The runner prints per-turn latency and token usage. <!-- RUN1-NUMBERS -->
+All 12 pass on `claude-sonnet-5` after the v2 changes (transcripts: [docs/live_run_sonnet5.txt](docs/live_run_sonnet5.txt)).
+Measured there: 37 turns, **p50 4.5 s / p95 5.5 s per turn**, 216k input + 10k output tokens ≈ **$0.015 per turn**
+(two model calls per turn, plus one to write the email when the caller asks for it).
 
 ### Red-team testing
 
