@@ -1,6 +1,7 @@
 # Insurance Claims SOP Agent
 
 **🎥 Demo video: [watch here](https://drive.google.com/file/d/12VzFdR5fcOxpFE4-Srud-9FxQ4YAt7wE/view?usp=sharing)**
+(Recorded on the first submission; v2 rewords some replies, defaults to `claude-sonnet-5` and adds sample chips. The workflow shown is unchanged.)
 
 ![Demo: the frustrated caller from the brief during identity verification, with the harness panel on the right](https://raw.githubusercontent.com/yangcan1/insurance-sop-agent/main/docs/img/demo-verify.jpg)
 
