@@ -1,6 +1,6 @@
 # Insurance Claims SOP Agent
 
-**🎥 Demo video (4 min): [watch here](https://drive.google.com/file/d/12VzFdR5fcOxpFE4-Srud-9FxQ4YAt7wE/view?usp=sharing)**
+**🎥 Demo video: [watch here](https://drive.google.com/file/d/12VzFdR5fcOxpFE4-Srud-9FxQ4YAt7wE/view?usp=sharing)**
 
 A claims-support chat agent that follows a fixed business workflow but still converses naturally.
 **Code owns the workflow; the LLM owns the language.**
