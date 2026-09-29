@@ -90,6 +90,10 @@ const SAMPLES = {
   "Demo case": "I'm the policyholder. My name is Margaret Chen, policy POL-9921. I'm calling about my denied healthcare claim from January. DOB is 1985-03-15, SSN last four is 4472.",
   "Hint first": "Hi, I'm calling about my denied healthcare claim from January.",
   "Frustrated": "I already told you who I am. This is ridiculous. Just tell me why my claim was denied.",
+  "Name only": "Margaret Chen",
+  "DOB + SSN": "My date of birth is March 15, 1985 and my SSN ends in 4472.",
+  "Ambiguous": "I'm Margaret Chen, DOB 1985-03-15, SSN last four 4472. It's about my healthcare claim from January.",
+  "The denied one": "The one that was denied.",
   "Off-topic": "What is RL?",
   "Wrong DOB": "I'm Margaret Chen, DOB 1985-03-16, SSN last four 4472.",
   "Representative": "Hi, I'm David Chen, calling on behalf of my mother Margaret Chen. Her date of birth is 1985-03-15 and her phone number is 650-521-2836.",
@@ -148,7 +152,7 @@ function render(s) {
     `<div class="step ${n < at ? "done" : n === at && !term ? "now" : ""}">${p.replace("_", " ")}</div>`).join("") + "</div>";
   if (term) h += `<div class="terminal ${s.phase}">${s.phase === "ENDED" ? "Conversation ended" : "Transferred to a human representative"}</div>`;
 
-  const v = s.verification, labels = {name: "Full name", dob: "Date of birth", phone: "Phone", email: "Email", id_last4: "SSN / ID last 4", policy_number: "Policy # (lookup only)"};
+  const v = s.verification, labels = {name: "Full name", dob: "Date of birth", phone: "Phone", email: "Email", id_last4: "SSN / ID last 4", policy_number: "Policy # (not counted)"};
   const idRows = {};
   for (const [k, l] of Object.entries(labels))
     idRows[l] = s.claimed[k] ? esc(s.claimed[k]) : (s.declined.includes(k) ? '<span class="pill bad">declined</span>' : "—");
@@ -189,6 +193,7 @@ for (const [label, text] of Object.entries(SAMPLES)) {
 $("form").onsubmit = e => { e.preventDefault(); send($("input").value); };
 $("input").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send($("input").value); } };
 $("reset").onclick = reset;
+$("scenario").onchange = reset;  // a new consent scenario means a new conversation
 api("/api/config").then(c => {
   $("model").textContent = c.model; $("today").textContent = "demo date " + c.demo_today;
   $("scenario").innerHTML = c.consent_scenarios.map(x => `<option value="${x}">consent: ${x}</option>`).join("");

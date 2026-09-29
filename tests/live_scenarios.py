@@ -7,6 +7,7 @@ Each scenario checks harness state after the real LLM's extraction, and that not
 claim-specific reached the caller before verification.
 """
 import sys
+import time
 
 from dotenv import load_dotenv
 
@@ -17,6 +18,8 @@ from app.llm import LLM  # noqa: E402
 
 DEMO = ("I'm the policyholder. My name is Margaret Chen, policy POL-9921. I'm calling about my denied healthcare "
         "claim from January. DOB is 1985-03-15, SSN last four is 4472.")
+
+SECS = []
 
 SCENARIOS = {
     "demo": ([DEMO, "Why exactly was it denied?", "What documents do you need and how do I send them?",
@@ -46,6 +49,12 @@ SCENARIOS = {
                   lambda s, st: s.party_id == "P13" and s.case_id is None),
     "other_insurer": ([DEMO, "Also, what's the status of my Geico auto claim?"],
                       lambda s, st: s.case_id == "CL-2048" and s.off_topic >= 1),
+    "chip_frustrated": (["I already told you who I am. This is ridiculous. Just tell me why my claim was denied.",
+                         "Fine. Margaret Chen, March 15 1985, SSN ends 4472."],
+                        lambda s, st: st[0][1] is None and s.party_id == "P9" and s.case_id == "CL-2048"),
+    "frustrated_handoff": (["I already told you who I am. This is ridiculous. Just tell me why my claim was denied.",
+                            "No. This is a joke. I'm not doing this again.", "Fine, get me a person."],
+                           lambda s, st: s.phase == "HUMAN_HANDOFF" and s.party_id is None and st[1][1] is None),
     "refusal": (["I'm Ava Lopez. I'm not giving you my social security number.", "My birthday is August 21 1990",
                  "email is ava.lopez@email.com"],
                 lambda s, st: s.party_id == "P7" and "id_last4" in s.declined),
@@ -58,7 +67,9 @@ def run(name, llm):
     print(f"\n=== {name} ===")
     for m in messages:
         verified_before = s.party_id
+        t0 = time.perf_counter()
         reply = harness.turn(s, m, llm)
+        SECS.append(time.perf_counter() - t0)
         states.append((s.phase, s.party_id, s.case_id))
         blocked = [e for e in s.trace[-1]["events"] if e["type"] == "guard_blocked"]
         if not verified_before and not s.party_id:
@@ -75,5 +86,9 @@ if __name__ == "__main__":
     names = sys.argv[1:] or list(SCENARIOS)
     llm = LLM()
     results = {n: run(n, llm) for n in names}
+    from app.llm import MODEL, USAGE
+    ss = sorted(SECS)
+    print(f"\nmodel={MODEL} turns={len(ss)} p50={ss[len(ss)//2]:.1f}s p95={ss[max(int(len(ss)*.95)-1,0)]:.1f}s "
+          f"tokens in/out={USAGE['in']}/{USAGE['out']}")
     print("\n" + "\n".join(f"{'PASS' if v else 'FAIL'}  {k}" for k, v in results.items()))
     sys.exit(0 if all(results.values()) else 1)

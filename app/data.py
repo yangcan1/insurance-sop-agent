@@ -31,7 +31,7 @@ FIELD_LABELS = {
     "dob": "date of birth",
     "phone": "phone number",
     "email": "email address",
-    "id_last4": "last 4 digits of SSN / national ID",
+    "id_last4": "last 4 digits of SSN or national ID",
 }
 MONEY_FIELDS = ("expected_reimbursement_amount", "allowed_max_amount", "net_pay", "net_fee")
 
@@ -206,8 +206,8 @@ def doc_guidance(doc):
     }
 
 
-def followup_guidance(claim, text):
-    """All follow-up rules that apply to this claim; keyword hits on the caller's words are flagged."""
+def followup_guidance(claim, text, intent=None):
+    """All follow-up rules that apply to this claim; keyword hits on the caller's words and the resolved intent are flagged."""
     docs = claim.get("documents_needed") or []
     fill = {
         "case_id": claim["case_id"],
@@ -223,12 +223,13 @@ def followup_guidance(claim, text):
         out.append({
             "topic": g["topic"],
             "matches_caller_wording": any(k in text for k in g.get("match_any", [])),
+            "matches_intent": intent in g.get("intent_hints", []),
             "text": g["en"].format(**fill),
         })
     return out
 
 
-def claim_facts(claim, caller_text=""):
+def claim_facts(claim, caller_text="", intent=None):
     """Everything the agent may say about one claim — the only claim data the responder ever sees."""
     facts = {k: v for k, v in claim.items() if k != "party_id"}
     for k in MONEY_FIELDS:
@@ -241,7 +242,7 @@ def claim_facts(claim, caller_text=""):
     facts["documents_guidance"] = [doc_guidance(d) for d in claim.get("documents_needed", [])]
     facts["case_type_guidance"] = GUIDE["case_type_guidance"].get(claim["case_type"], {}).get("en")
     facts["general_submission_guidance"] = GUIDE["default_guidance"]["en"]
-    facts["followup_guidance"] = followup_guidance(claim, caller_text)
+    facts["followup_guidance"] = followup_guidance(claim, caller_text, intent)
     facts["followup_fallback"] = GUIDE["claim_followup_fallback"]["en"]
     facts["human_review_rule"] = GUIDE["claim_followup_settings"]["human_review_after_document_alternatives_exhausted"]["en"]
     facts["field_definitions"] = {k: v["description"] for k, v in CLAIM_SCHEMA["field_descriptions"].items()}

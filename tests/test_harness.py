@@ -1,5 +1,7 @@
 """Deterministic SOP tests: a scripted fake LLM stands in for the model, so these check the
 harness itself (gates, memory, transitions, data isolation) with no API key."""
+import json
+
 from app import data, harness
 from app.llm import EmailSummary, Extraction as X
 
@@ -13,6 +15,7 @@ class FakeLLM:
 
     def respond(self, harness_state, messages):
         self.prompts.append(harness_state)
+        self.seen = getattr(self, "seen", []) + [messages]
         return self.reply
 
     def summarize(self, facts, transcript):
@@ -402,3 +405,58 @@ def test_bad_profile_credentials_are_a_401(monkeypatch):
         assert False
     except HTTPException as e:
         assert e.status_code == 401 and "/secret/path" not in e.detail
+
+
+# ---------- final-pass behaviours (escalation, naturalness, trace, intent) ----------
+
+def test_frustration_offer_needs_consecutive_turns():
+    llm = FakeLLM(*[X(emotion="frustrated")] * 2, X())
+    run(llm, "a", "b", "c")
+    assert "offer a transfer" not in llm.prompts[0] and "human representative" in llm.prompts[0]  # alternative from turn 1
+    assert "offer a transfer" in llm.prompts[1] and "offer a transfer" not in llm.prompts[2]  # calm turn resets it
+
+
+def test_frustration_offer_also_after_verification():
+    llm = FakeLLM(DEMO, *[X(emotion="angry")] * 2)
+    s = run(llm, "demo", "a", "b")
+    assert s.phase == "PROCESS_CASE" and "offer a transfer" in llm.prompts[-1]
+
+
+def test_field_list_is_read_once():
+    llm = FakeLLM(X(case_status="denied"), X(full_name="Margaret Chen"))
+    run(llm, "a", "b")
+    assert "don't read the whole list" not in llm.prompts[0] and "don't read the whole list" in llm.prompts[1]
+
+
+def test_attempt_countdown_only_on_last_try():
+    wrong = [X(full_name="Margaret Chen", dob=f"1985-03-1{d}", id_last4="4472") for d in (6, 7, 8)]
+    llm = FakeLLM(*wrong)
+    run(llm, "a", "b", "c")
+    assert "last try" not in llm.prompts[0] and "last try" in llm.prompts[1]
+
+
+def test_demo_trace_shows_both_transitions():
+    s = run(FakeLLM(DEMO), "demo")
+    t = [e["data"] for e in s.trace[-1]["events"] if e["type"] == "transition"]
+    assert t == ["VERIFY_ID -> RESOLVE_INTENT", "RESOLVE_INTENT -> PROCESS_CASE"]
+
+
+def test_intent_flags_matching_guidance():
+    claim = next(c for c in data.CLAIMS if c["case_id"] == "CL-2048")
+    g = {x["topic"]: x for x in data.claim_facts(claim, "how long", intent="denial_question")["followup_guidance"]}
+    assert g["submission_timing"]["matches_intent"] and not g["submission_method"]["matches_intent"]
+
+
+def test_regate_trims_earlier_claim_talk_from_responder_context():
+    llm = FakeLLM(X(**MARGARET), X(caller_role="representative", representative_name="Bob Stranger"),
+                  reply="Your claim CL-2048 was denied.")
+    s = run(llm, "it's me", "actually I'm her neighbour Bob")
+    assert s.party_id is None and "CL-2048" not in json.dumps(llm.seen[-1])
+
+
+def test_empty_summary_does_not_produce_blank_email_sections():
+    class Empty(FakeLLM):
+        def summarize(self, facts, transcript):
+            return EmailSummary(discussed=[], next_steps=[])
+    s = run(Empty(DEMO, X(no_more_questions=True), X(email_choice="send")), "demo", "done", "yes")
+    assert "(none recorded)" in s.email["body"]

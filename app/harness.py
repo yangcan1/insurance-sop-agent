@@ -15,7 +15,7 @@ PHASES = ("VERIFY_ID", "RESOLVE_INTENT", "PROCESS_CASE", "POST_PROCESS")
 TERMINAL = ("HUMAN_HANDOFF", "ENDED")
 MAX_FAILED_VERIFICATIONS = 3
 OFF_TOPIC_LIMIT = 3
-FRUSTRATION_LIMIT = 3
+FRUSTRATION_LIMIT = 2  # consecutive frustrated/angry turns before we stop persuading
 
 GREETING = ("Hi, thanks for contacting claims support. I can help with questions about your policy and claims. "
             "To get started, could you tell me your full name and what you're calling about today?")
@@ -24,11 +24,20 @@ SAFE_UNVERIFIED_REPLY = (
     "Could you give me at least three of these: your full name, date of birth, phone number, email on file, "
     "or the last four digits of your SSN?")
 EMOTION_NOTES = {
-    "frustrated": "Caller is frustrated. Start with one short, genuine acknowledgment, then explain why this step matters, then give the concrete options.",
-    "angry": "Caller is angry. Stay calm and respectful; acknowledge briefly, don't argue or over-apologize, explain why this step matters, offer the options including a human representative.",
-    "anxious": "Caller sounds anxious. Reassure them briefly and make the next step clear and simple.",
-    "confused": "Caller seems confused. Slow down, explain in plain words, and ask one thing at a time.",
-    "sad": "Caller sounds upset. Acknowledge it with empathy before continuing.",
+    "frustrated": "Caller is frustrated. Open with one short acknowledgment of the specific thing frustrating them, in "
+                  "your own words (not a stock line like 'I understand your frustration'). If they say they already gave "
+                  "their details but fewer than 3 are received here, say plainly and without blame that you don't have "
+                  "them in this chat yet. If a verification or consent step is what's blocking them: the reason in one "
+                  "clause, the quickest way through, and that they can talk to a human representative instead. If "
+                  "nothing is blocking them, skip the explanation and just help.",
+    "angry": "Caller is angry. Stay calm and steady: one brief acknowledgment, no arguing, no repeated apologies, don't "
+             "match their tone. If a verification or consent step is blocking them, say in one clause why it protects "
+             "them, then the fastest way through, and offer a human representative. If nothing is blocking them, just "
+             "help. Don't lecture.",
+    "anxious": "Caller sounds anxious. Reassure them in one sentence using something true from your instructions or data "
+               "(no 'the good news is'), then make the single next step clear. Don't pile on details.",
+    "confused": "Caller seems confused. Plain words, one idea per sentence, and ask for exactly one thing.",
+    "sad": "Caller sounds upset. One sentence of genuine empathy first, then continue gently.",
 }
 
 
@@ -59,8 +68,10 @@ class Session:
     discussed: list = field(default_factory=list)
     # conversation health
     off_topic: int = 0
-    frustration: int = 0
+    frustration: int = 0                              # consecutive frustrated/angry turns
     emotion: str = "calm"
+    id_asked: bool = False                            # the accepted ID details were listed once already
+    context_start: int = 0                            # history index the responder may see from (moves on re-gate)
     # outcomes
     email: dict = None
     email_choice: str = None
@@ -85,7 +96,8 @@ def turn(s, text, llm):
         events.append({"type": "extract", "data": x.model_dump(exclude_defaults=True)})
         phase_before = s.phase
         notes = apply(s, x, text, llm, events)
-        if s.phase != phase_before:
+        logged = [e["data"] for e in events if e["type"] == "transition"]
+        if s.phase != phase_before and not (logged and str(logged[-1]).endswith(s.phase)):
             events.append({"type": "transition", "data": f"{phase_before} -> {s.phase}"})
         prompt = harness_state(s, notes, x, text)
         events.append({"type": "directive", "data": notes})
@@ -143,8 +155,7 @@ def apply(s, x, text, llm, events):
     notes = []
     remember(s, x, events)
     s.emotion = x.emotion
-    if x.emotion in ("frustrated", "angry"):
-        s.frustration += 1
+    s.frustration = s.frustration + 1 if x.emotion in ("frustrated", "angry") else 0  # a calm turn resets it
     if x.emotion in EMOTION_NOTES:
         notes.append(EMOTION_NOTES[x.emotion])
 
@@ -153,15 +164,16 @@ def apply(s, x, text, llm, events):
     if x.off_topic:
         s.off_topic += 1
         notes.append(
-            "Part of the message is outside what you can help with. Politely decline that part in one sentence "
-            "(do not answer it) and steer back to their insurance needs."
-            + (" The caller keeps asking unrelated questions: offer to connect them with a human representative "
-               "for help with their insurance needs (a human won't answer unrelated questions either)."
+            "Part of the message is outside what you can help with. Decline that part in one plain sentence without "
+            "answering any of it (no partial facts or hints), then steer back to their insurance needs in one sentence."
+            + (" They keep asking unrelated things: offer to connect them with a human representative for help with "
+               "their policy or claims. Don't comment on what the representative can or can't answer."
                if s.off_topic >= OFF_TOPIC_LIMIT else ""))
 
     if s.party_id and (s.caller_role == "representative" or s.rep_name) and s.consent != "approved":
         # the speaker turned out not to be the policyholder: back through the representative + consent gate
         s.party_id, s.case_id, s.phase = None, None, "VERIFY_ID"
+        s.context_start = len(s.history) - 1  # earlier replies held claim facts: the responder starts fresh
         events.append({"type": "transition", "data": "re-gated: caller is acting for someone else"})
 
     if s.phase == "VERIFY_ID":
@@ -173,9 +185,14 @@ def apply(s, x, text, llm, events):
     elif s.phase == "POST_PROCESS":
         post_step(s, x, text, llm, notes, events)
 
-    if s.phase == "VERIFY_ID" and s.frustration >= FRUSTRATION_LIMIT:
-        notes.append("The caller has been frustrated for several turns: also offer a transfer to a human "
-                     "representative (who will also need to verify them).")
+    if s.frustration >= FRUSTRATION_LIMIT and s.phase not in TERMINAL:  # explained once already: stop persuading
+        notes.append(
+            "The caller has stayed frustrated: stop explaining; answer as directly as the instructions allow and "
+            "offer a transfer to a human representative in one short clause."
+            if s.party_id else
+            "The caller has stayed frustrated: stop explaining why verification is needed and offer a transfer to a "
+            "human representative as one of two short choices: give the remaining details now, or be connected to a "
+            "person now (who will also confirm their identity). No more persuasion.")
     return notes
 
 
@@ -190,7 +207,7 @@ def verify_step(s, notes, events):
     if r["verified"]:
         if s.caller_role == "representative" or s.rep_name:
             return representative_step(s, r["party_id"], notes, events)
-        return authorize(s, r["party_id"], notes)
+        return authorize(s, r["party_id"], notes, events)
 
     if len(provided) >= MIN_MATCHES:
         attempt = json.dumps(s.claimed, sort_keys=True)
@@ -201,45 +218,61 @@ def verify_step(s, notes, events):
             return handoff(s, "identity could not be verified after several attempts", notes)
         notes.append(
             "Verification FAILED: the check has already run on everything the caller has given, including this "
-            "message, and the details do not all match our records. Say so now; never say you are still checking. "
-            "Do NOT say which detail is wrong. Adding more details won't fix a wrong one: ask them to re-check and "
-            "restate their details, or tell you which one they're unsure of so it can be set aside"
-            + (f" (other details they could use: {', '.join(remaining)})" if remaining else "") + ". "
-            f"Attempts left before transfer to a human: {MAX_FAILED_VERIFICATIONS - s.failed_attempts}.")
+            "message, and the details do not all match our records. Say so now, plainly and kindly; never say you "
+            "are still checking. Do NOT say which detail is wrong (if they ask which one, say you can't tell them, "
+            "because it would help an impostor). Adding more details won't fix a wrong one: ask them to re-check "
+            "what they gave, or to name the one they're least sure of so it can be set aside"
+            + (f", or to use a different detail instead ({', '.join(remaining)})" if remaining else "") + "."
+            + (" This is their last try before you'd connect them to a human representative who can verify them "
+               "another way; say that as help, not a warning."
+               if MAX_FAILED_VERIFICATIONS - s.failed_attempts == 1 else ""))
     elif len(provided) + len(remaining) < MIN_MATCHES:
-        notes.append("The caller has declined too many details to complete verification. Explain kindly that "
-                     "three details are required to protect their account, and offer a human representative.")
+        notes.append("The caller has ruled out too many details to reach three. Say kindly, in one or two sentences, "
+                     "that three matching details are needed to protect their account, and offer a human representative "
+                     "(or to reconsider one of the details they set aside). No pressure beyond that.")
     else:
         got = ", ".join(FIELD_LABELS[f] for f in provided) or "none yet"
+        need = MIN_MATCHES - len(provided)
         notes.append(
             f"Identity NOT verified yet. Received {len(provided)} of the {MIN_MATCHES} required details ({got}). "
-            f"Ask for {MIN_MATCHES - len(provided)} more from: {', '.join(remaining)}. "
-            "The caller may choose any of these. Do not discuss any claim yet.")
+            + (f"Ask for {need} more from: {', '.join(remaining)}. Any {need} of these will do; the caller chooses. "
+               if not s.id_asked else
+               f"Ask for {need} more in one short sentence. You already listed the accepted details in an earlier reply, "
+               f"so don't read the whole list again; name one or two that would finish it, unless they ask what counts. "
+               f"Still accepted: {', '.join(remaining)}. ")
+            + "One question. Do not discuss any claim yet.")
+        s.id_asked = True
     if s.case_hints or s.intent:
-        notes.append("The caller already told you what they're calling about (see 'Remembered'). Briefly "
-                     "acknowledge you've noted it and will look into it right after verification. Do not ask again.")
+        notes.append("The caller already said what they're calling about (see 'Remembered'). If none of your earlier "
+                     "replies acknowledged it, say in a few words that you've noted it and will look into it right after "
+                     "verification; otherwise don't repeat that. Don't ask what they're calling about, and don't discuss it.")
 
 
 def representative_step(s, party_id, notes, events):
     if s.consent == "timeout":
         notes.append("The policyholder's authorization already timed out; you still cannot continue on their behalf. "
-                     "Offer a human representative or suggest the policyholder contact us directly.")
+                     "Say so in one sentence; the only options are a human representative or the policyholder "
+                     "contacting us directly.")
         return
     rep = data.find_representative(s.rep_name, party_id)
     events.append({"type": "tool", "name": "find_representative", "data": {"rep_name": s.rep_name, "authorized": bool(rep)}})
     if not s.rep_name:
-        notes.append("The caller is calling on someone else's behalf. Ask for the caller's own full name.")
+        notes.append("The caller is calling on someone else's behalf. Ask for the caller's own full name, as one "
+                     "question. Don't say whether the policyholder's details matched, and don't discuss the account.")
     elif not rep:
         notes.append("The caller is NOT an authorized representative on file for this policy, so you cannot discuss "
-                     "the account. Explain kindly; the policyholder can contact us directly, or you can offer a human representative.")
+                     "the account. Say kindly, in one or two sentences, that you can't go over this account with them; "
+                     "the policyholder can contact us directly, or you can offer a human representative. Don't say "
+                     "whether the policyholder's details matched.")
     else:
         s.pending_party, s.consent, s.consent_checks = party_id, "pending", 0
         events.append({"type": "tool", "name": "request_consent", "data": {"party_id": party_id, "status": "pending"}})
         notes.append(
-            "SOP requires the policyholder's consent before you can discuss anything on this account. Say you've "
-            "sent an authorization request to the policyholder's phone number on file and ask the caller to let "
-            "you know once it's approved. Don't confirm whether the details matched or whether the caller is on "
-            "file, and don't discuss any claim.")
+            "The policyholder's consent is required before anything on this account can be discussed with someone "
+            "else; give that reason in one clause, in plain words (never say 'SOP' or 'policy requires'). Say you've "
+            "sent an authorization request to the policyholder's phone number on file and ask, as one question, that "
+            "they let you know once it's approved. Don't confirm whether the details matched or whether the caller is "
+            "on file, and don't discuss any claim.")
 
 
 def consent_step(s, notes, events):
@@ -247,22 +280,25 @@ def consent_step(s, notes, events):
     s.consent = data.consent_status(s.consent_scenario, s.consent_checks)
     events.append({"type": "tool", "name": "check_consent", "data": {"check": s.consent_checks, "status": s.consent}})
     if s.consent == "approved":
-        return authorize(s, s.pending_party, notes, via_rep=True)
+        return authorize(s, s.pending_party, notes, events, via_rep=True)
     if s.consent == "timeout":
         s.pending_party = None
         notes.append("The policyholder's authorization was not received in time, so you cannot continue on their "
-                     "behalf. Explain why consent protects the policyholder. The only options are a human "
-                     "representative or the policyholder contacting us directly; don't promise a new request or a callback.")
+                     "behalf. Say so plainly, with one clause on why consent protects the policyholder. The only "
+                     "options are a human representative or the policyholder contacting us directly; don't promise a "
+                     "new request or a callback.")
     else:
-        notes.append("Authorization from the policyholder is still pending. Explain you can't discuss the account "
-                     "until they approve it, and that you'll check again when the caller is ready.")
+        notes.append("Authorization from the policyholder is still pending. Say in one sentence that you can't discuss "
+                     "the account until they approve it and that you'll check again when the caller says so. Don't "
+                     "re-explain the whole process.")
 
 
-def authorize(s, party_id, notes, via_rep=False):
+def authorize(s, party_id, notes, events, via_rep=False):
+    events.append({"type": "transition", "data": f"{s.phase} -> RESOLVE_INTENT"})
     s.party_id, s.pending_party, s.phase = party_id, None, "RESOLVE_INTENT"
     who = data.policyholder(party_id)["name"]
     notes.append(f"Identity verified{' and consent approved' if via_rep else ''}: the account belongs to {who}. "
-                 "Thank the caller briefly for verifying.")
+                 "Thank the caller in a few words, then move straight on; no 'you're all set' ceremony.")
 
 
 def resolve_step(s, x, text, llm, notes, events):
@@ -286,26 +322,31 @@ def resolve_step(s, x, text, llm, notes, events):
         notes.append("If CLAIMS ON FILE answers the caller's question (e.g. statuses or amounts across claims), "
                      "answer it from there.")
     if len(matches) > 1:
-        notes.append("Several claims match what the caller described. Ask which one they mean, briefly listing "
-                     "only the matching claims (id, type, filed date, status) from the data section.")
+        notes.append("Several claims match what the caller described. Ask which one they mean, as one question, naming "
+                     "only the matching claims in plain words (type, filed date in words, status; claim id last).")
     elif s.case_hints:
-        notes.append("No claim matches what the caller described. Say so kindly and list the claims on file "
-                     "(id, type, filed date, status) so they can pick one.")
+        notes.append("No claim matches what the caller described. Say so kindly in one sentence and name the claims on "
+                     "file in plain words (type, filed date in words, status; claim id last) so they can pick one.")
     else:
-        notes.append("Ask what they're calling about today; you may briefly list the claims on file "
-                     "(id, type, filed date, status).")
+        notes.append("Ask what they'd like help with, as one question. If there are more than two claims on file, "
+                     "don't read them all out: name the one or two most likely relevant (denied or open first) in plain "
+                     "words and mention there are others.")
 
 
 def select_case(s, claim, intent, notes, events):
+    if s.phase != "PROCESS_CASE":
+        events.append({"type": "transition", "data": f"{s.phase} -> PROCESS_CASE"})
     s.case_id, s.phase = claim["case_id"], "PROCESS_CASE"
     # default path for the case when the caller didn't say what they need
     s.intent = intent or {"denied": "denial_question", "open": "status_inquiry"}.get(claim["status"], "general_claim_question")
     if claim["case_id"] not in s.discussed:
         s.discussed.append(claim["case_id"])
     events.append({"type": "tool", "name": "get_claim", "data": claim["case_id"]})
-    notes.append(f"Claim {claim['case_id']} is selected (intent: {s.intent}). Confirm which claim you're looking at "
-                 "in a few words, then address the caller's need using the CLAIM FACTS. If they haven't asked a "
-                 "specific question, give the key status and the most useful next step.")
+    notes.append(f"Claim {claim['case_id']} is selected (intent: {s.intent}). Name the claim in a few words (type and "
+                 "filed month, plus the id), then answer what they came for from the CLAIM FACTS: for a denied claim, "
+                 "the denial reason and the appeal deadline in one clause; for an open claim, the status; otherwise the "
+                 "key status. Then the single most useful next step. Don't recite amounts, day counts, or document "
+                 "requirements unless asked. At most one question, offering the most likely next detail.")
 
 
 def process_step(s, x, text, llm, notes, events):
@@ -322,9 +363,12 @@ def process_step(s, x, text, llm, notes, events):
         s.intent = x.intent
     if (x.no_more_questions and not x.question) or x.email_choice != "none":
         return post_step(s, x, text, llm, notes, events)
-    notes.append("Answer using only the CLAIM FACTS; guidance marked matches_caller_wording is most likely "
-                 "relevant. If the facts don't cover the question, use followup_fallback or offer a human "
-                 "representative. When their question is answered, ask if there's anything else.")
+    notes.append("Answer using only the CLAIM FACTS; guidance marked matches_caller_wording or matches_intent is most "
+                 "likely relevant. If the facts don't cover the question, use followup_fallback or offer a human "
+                 "representative. If they ask again about something you already explained, don't repeat it word for "
+                 "word: say that's the full reason on file and add only what's new. Close with at most one short "
+                 "question, preferably a specific next-step offer (how to upload, what a document needs); ask if there's "
+                 "anything else only once their questions seem covered, and never reuse last turn's closing question.")
 
 
 def post_step(s, x, text, llm, notes, events):
@@ -346,25 +390,28 @@ def post_step(s, x, text, llm, notes, events):
             "Answer their question using only the data section (if it's about the summary email: it covers what was "
             f"discussed, claim status and next steps, and goes only to the email on file, {email}). "
             + (f"They already chose to {'receive' if s.email_choice == 'send' else 'skip'} the summary email; it "
-               "will be handled when they're done. Ask if there's anything else."
-               if s.email_choice else f"Then ask whether they'd like the summary emailed to {email}, or to skip it."))
+               "will be handled when they're done. End with at most one short question."
+               if s.email_choice else
+               f"Then ask, as one yes/no question, whether they'd like the summary emailed to {email} or would rather skip it."))
         return
     if s.email_choice == "send":
         s.email, s.phase = compose_email(s, llm), "ENDED"
         events.append({"type": "tool", "name": "send_email", "data": {"to": s.email["to"]}})
-        notes.append(f"The summary email has been sent to {email}. Confirm, mention the key next step in one "
-                     "sentence, and close the conversation warmly.")
+        notes.append(f"The summary email has been sent to {email}. Confirm that in one sentence, give the key next step "
+                     "(with its date, if there is one) in one sentence, and close warmly in one more. No questions.")
     elif s.email_choice == "skip":
         s.phase = "ENDED"
-        notes.append("The caller chose not to receive the email. Confirm nothing will be sent and close warmly.")
+        notes.append("The caller chose not to receive the email. Say nothing will be sent and close warmly, in one or "
+                     "two sentences. No questions.")
     elif not s.email_offered:
         s.email_offered = True
-        notes.append(f"Offer to email a summary of this conversation (what was discussed, claim status, and next "
-                     f"steps) to the email on file, {email}. Make clear they can choose to receive it or skip it. "
-                     "Only this address can be used.")
+        notes.append(f"Offer, as one yes/no question, to email a summary of this conversation (what was discussed, claim "
+                     f"status, and next steps) to the email on file, {email}, the only address that can be used. Say the "
+                     "address as given (not 'ending in'). The yes/no question already leaves the choice to them, so don't "
+                     "add 'it's optional' or 'up to you'.")
     else:
-        notes.append(f"Ask clearly whether they'd like the summary emailed to {email}, or prefer to skip it. "
-                     "Only the email on file can be used.")
+        notes.append(f"Ask, as one yes/no question, whether they'd like the summary emailed to {email} or would rather "
+                     "skip it. Only the email on file can be used.")
 
 
 def compose_email(s, llm):
@@ -376,9 +423,9 @@ def compose_email(s, llm):
     body = "\n".join([
         f"Hi {rec['name']},", "",
         "Thank you for contacting claims support. Here is a summary of our conversation.", "",
-        "What we discussed:", *[f"- {d}" for d in summary.discussed], "",
+        "What we discussed:", *([f"- {d}" for d in summary.discussed] or ["- (none recorded)"]), "",
         "Claim status:", *([f"- {x}" for x in status] or ["- No specific claim was reviewed."]), "",
-        "Next steps:", *[f"- {n}" for n in summary.next_steps], "",
+        "Next steps:", *([f"- {n}" for n in summary.next_steps] or ["- (none recorded)"]), "",
         "If you have questions, just reply or contact claims support.",
     ])
     subject = f"Summary of your claims support conversation{' - ' + ', '.join(s.discussed) if s.discussed else ''}"
@@ -390,9 +437,10 @@ def handoff(s, reason, notes):
                  "case_id": s.case_id, "case_hints": s.case_hints, "emotion": s.emotion,
                  "questions": s.questions}
     s.phase = "HUMAN_HANDOFF"
-    notes.append(f"Transfer the caller to a human representative (reason: {reason}). Tell them warmly that you're "
-                 "connecting them and the representative will see the context of this conversation"
-                 + ("." if s.party_id else ", though they will also need to verify identity."))
+    notes.append(f"Transfer the caller to a human representative (reason: {reason}). In two or three sentences: "
+                 "acknowledge briefly if they're upset, say you're connecting them now and that the representative will "
+                 "see this conversation" + ("." if s.party_id else ", and will confirm their identity before going into "
+                 "the account.") + " No questions, no re-explaining the rules.")
     return notes
 
 
@@ -428,12 +476,13 @@ def harness_state(s, notes, x, text):
     lines.append("CLAIMS ON FILE: " + json.dumps([data.claim_brief(c) for c in data.claims_for(s.party_id)]))
     if s.case_id and s.phase in ("PROCESS_CASE", "POST_PROCESS", "ENDED"):
         claim = next(c for c in data.CLAIMS if c["case_id"] == s.case_id)
-        lines.append("CLAIM FACTS: " + json.dumps(data.claim_facts(claim, " ".join([*s.questions[-3:], text])), indent=1))
+        lines.append("CLAIM FACTS: " + json.dumps(
+            data.claim_facts(claim, " ".join([*s.questions[-3:], text]), intent=s.intent), indent=1))
     return "\n".join(lines)
 
 
 def llm_messages(s):
-    msgs = list(s.history)
+    msgs = list(s.history[s.context_start:])
     while msgs and msgs[0]["role"] == "assistant":  # API conversations must start with the user
         msgs.pop(0)
     return msgs
